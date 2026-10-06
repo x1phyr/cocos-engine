@@ -1,0 +1,42 @@
+name: Sync Upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add upstream
+        run: |
+          git remote add upstream https://github.com/cocos/cocos-engine.git
+          git fetch upstream --prune --tags
+
+      - name: Sync upstream branches
+        run: |
+          git for-each-ref \
+            --format='%(refname:strip=3)' \
+            refs/remotes/upstream/ \
+          | grep -v '^HEAD$' \
+          | while read branch; do
+              echo "Syncing: $branch"
+
+              git push origin \
+                "refs/remotes/upstream/$branch:refs/heads/$branch" \
+                --force
+            done
+
+      - name: Sync tags
+        run: |
+          git push origin --tags
