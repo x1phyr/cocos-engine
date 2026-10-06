@@ -2,41 +2,132 @@ name: Sync Upstream
 
 on:
   workflow_dispatch:
+
   schedule:
+    # 每天 UTC 02:00
+    # 北京时间 10:00
     - cron: "0 2 * * *"
 
-permissions:
-  contents: write
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
 
 jobs:
   sync:
+    name: Sync all upstream branches and tags
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
 
-      - name: Add upstream
+      - name: Configure Git
         run: |
-          git remote add upstream https://github.com/cocos/cocos-engine.git
-          git fetch upstream --prune --tags
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Configure upstream
+        run: |
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream https://github.com/cocos/cocos-engine.git
+          else
+            git remote add upstream https://github.com/cocos/cocos-engine.git
+          fi
+
+      - name: Fetch upstream branches and tags
+        run: |
+          git fetch upstream \
+            --prune \
+            --tags \
+            --force \
+            '+refs/heads/*:refs/remotes/upstream/*'
 
       - name: Sync upstream branches
+        shell: bash
         run: |
+          set +e
+
+          FAILED_FILE="$RUNNER_TEMP/failed-branches.txt"
+          : > "$FAILED_FILE"
+
           git for-each-ref \
             --format='%(refname:strip=3)' \
             refs/remotes/upstream/ \
           | grep -v '^HEAD$' \
-          | while read branch; do
-              echo "Syncing: $branch"
+          | while IFS= read -r branch; do
+              echo
+              echo "========================================"
+              echo "Syncing branch: $branch"
+              echo "========================================"
 
               git push origin \
                 "refs/remotes/upstream/$branch:refs/heads/$branch" \
                 --force
+
+              status=$?
+
+              if [ "$status" -ne 0 ]; then
+                echo "::error::Failed to sync branch: $branch"
+                echo "$branch" >> "$FAILED_FILE"
+              else
+                echo "Successfully synced: $branch"
+              fi
             done
 
-      - name: Sync tags
+          echo
+          echo "========================================"
+          echo "Branch sync summary"
+          echo "========================================"
+
+          if [ -s "$FAILED_FILE" ]; then
+            echo "::warning::Some branches failed to sync:"
+            cat "$FAILED_FILE"
+
+            echo
+            echo "Failed branch count:"
+            wc -l < "$FAILED_FILE"
+          else
+            echo "All upstream branches synced successfully."
+          fi
+
+      - name: Sync upstream tags
+        shell: bash
         run: |
-          git push origin --tags
+          git push origin \
+            'refs/tags/*:refs/tags/*' \
+            --force
+
+      - name: Verify important branches
+        shell: bash
+        run: |
+          echo "Checking selected upstream branches..."
+
+          for branch in V3.8.9 develop v3.8; do
+            if git show-ref \
+              --verify \
+              --quiet \
+              "refs/remotes/upstream/$branch"; then
+
+              upstream_sha=$(git rev-parse "refs/remotes/upstream/$branch")
+
+              origin_sha=$(
+                git ls-remote \
+                  origin \
+                  "refs/heads/$branch" \
+                | awk '{print $1}'
+              )
+
+              echo "$branch"
+              echo "  upstream: $upstream_sha"
+              echo "  origin:   $origin_sha"
+
+              if [ "$upstream_sha" = "$origin_sha" ]; then
+                echo "  status: OK"
+              else
+                echo "::warning::$branch is not fully synchronized"
+              fi
+            fi
+          done
